@@ -68,6 +68,9 @@ wee path/to/document.html
 # View using the -p flag
 wee -p path/to/document.html
 
+# Open detached from terminal as a standalone app (Ctrl+C won't kill it)
+wee -n document.html
+
 # Open a directory (automatically finds index.html)
 wee ./my-docs
 
@@ -94,6 +97,7 @@ Arguments:
 
 Options:
   -p, --path <PATH>      Path flag alternative (-p / --path)
+  -n, --detach           Run detached in background as a standalone app (unhooked from terminal)
   -w, --watch            Enable live-reload (auto-refreshes when file or directory changes)
   -d, --devtools         Enable Developer Tools (F12 / right-click Inspect Element)
       --width <WIDTH>    Initial window width [default: 1024]

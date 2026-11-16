@@ -2508,6 +2508,7 @@ name = "wee"
 version = "0.0.1"
 dependencies = [
  "clap",
+ "libc",
  "mime_guess",
  "notify",
  "open",

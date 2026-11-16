@@ -21,6 +21,10 @@ struct Cli {
     #[arg(short = 'p', long = "path", value_name = "PATH")]
     path_flag: Option<PathBuf>,
 
+    /// Run detached in background as a standalone app (unhooked from terminal)
+    #[arg(short = 'n', long = "detach", visible_alias = "no-terminal")]
+    detach: bool,
+
     /// Enable live-reload (auto-refreshes when file or directory changes)
     #[arg(short = 'w', long = "watch")]
     watch: bool,
@@ -200,6 +204,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
     };
+
+    // Detach from controlling terminal if -n / --detach is requested
+    if args.detach && std::env::var("_WEE_DETACHED").is_err() {
+        let exe = std::env::current_exe()?;
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg(&html_file);
+        if args.watch {
+            cmd.arg("-w");
+        }
+        if args.devtools {
+            cmd.arg("-d");
+        }
+        if args.fullscreen {
+            cmd.arg("--fullscreen");
+        }
+        if let Some(ref title) = args.title {
+            cmd.arg("-t").arg(title);
+        }
+        cmd.arg("--width").arg(args.width.to_string());
+        cmd.arg("--height").arg(args.height.to_string());
+
+        cmd.env("_WEE_DETACHED", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        #[cfg(unix)]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+
+        cmd.spawn()?;
+        std::process::exit(0);
+    }
 
     let filename = html_file
         .file_name()
