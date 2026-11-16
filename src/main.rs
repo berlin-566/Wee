@@ -104,7 +104,7 @@ fn create_404_response(missing_path: &str) -> wry::http::Response<Cow<'static, [
 <html>
 <head>
     <meta charset="utf-8">
-    <title>404 Not Found — wee</title>
+    <title>404 Not Found - wee</title>
     <style>
         body {{
             font-family: system-ui, -apple-system, sans-serif;
@@ -209,7 +209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let initial_title = args
         .title
         .clone()
-        .unwrap_or_else(|| format!("{} — wee", filename));
+        .unwrap_or_else(|| format!("{} - wee", filename));
 
     let has_custom_title = args.title.is_some();
 
@@ -428,7 +428,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 UserEvent::SetTitle(doc_title) => {
                     if !has_custom_title {
-                        window.set_title(&format!("{} — wee", doc_title));
+                        window.set_title(&format!("{} - wee", doc_title));
                     }
                 }
             },
