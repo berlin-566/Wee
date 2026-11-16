@@ -371,6 +371,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load initial URL
     webview_builder = webview_builder.with_url(&initial_url);
 
+    #[cfg(target_os = "linux")]
+    let webview = {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+        let vbox = window.default_vbox().expect("Failed to get window default vbox");
+        webview_builder.build_gtk(vbox)?
+    };
+
+    #[cfg(not(target_os = "linux"))]
     let webview = webview_builder.build(&window)?;
 
     println!(
