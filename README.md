@@ -1,10 +1,10 @@
 # Wee
 
-The most lightweight, dedicated local HTML viewer written in Rust.
+The most lightweight, dedicated local HTML viewer and live wallpaper daemon written in Rust.
 
-Wee is built for one purpose: to view local HTML files effortlessly without the bloat, telemetry, or resource overhead of full desktop web browsers.
+Wee is built for viewing local HTML files effortlessly without the bloat, telemetry, or resource overhead of full desktop web browsers, and doubles as an animated, live HTML/video desktop wallpaper daemon for Linux.
 
-With a release binary of approximately 1.6 MB and fast startup, Wee provides a distraction-free window powered by your system's native WebKit engine.
+With a release binary of approximately 1.6 MB and fast startup, Wee provides a distraction-free window or desktop background powered by your system's native WebKit engine.
 
 ## Installation
 
@@ -25,9 +25,9 @@ cargo install --git https://github.com/berlin-566/Wee.git
 ### Build from Source
 
 Prerequisites:
-- Arch Linux / CachyOS: `sudo pacman -S webkit2gtk-4.1`
-- Ubuntu / Debian: `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev`
-- Fedora: `sudo dnf install webkit2gtk4.1-devel gtk3-devel`
+- Arch Linux / CachyOS: `sudo pacman -S webkit2gtk-4.1 gtk-layer-shell`
+- Ubuntu / Debian: `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libgtk-layer-shell-dev`
+- Fedora: `sudo dnf install webkit2gtk4.1-devel gtk3-devel gtk-layer-shell-devel`
 
 Build:
 
@@ -42,7 +42,9 @@ cargo install --path .
 
 - Lightweight and fast: Standalone 1.6 MB native executable with minimal memory consumption.
 - Zero browser clutter: Clean native window strictly displaying your HTML content.
-- Native Wayland and X11 support: Seamlessly integrates with modern Linux desktop environments.
+- Native Wayland & Layer-Shell support: Renders behind all windows as a desktop wallpaper on compositors like Niri, Sway, and Hyprland.
+- Live Wallpaper Daemon (`-dmn`): Sets any HTML page or looping video as your background, persisting across system reboots.
+- Daemon Management (`wee kill`): Safely terminates background instances and cleanly reveals your previous wallpaper (like eww).
 - Safe local asset resolution: Handles relative assets (images, stylesheets, scripts) via internal protocol (`wee://`).
 - Smart link routing: Local links stay inside Wee; external web links (`http://`, `https://`) automatically open in your default system browser.
 - Live-reload: Optional `--watch` (`-w`) flag auto-reloads whenever you save edits to local files.
@@ -60,6 +62,8 @@ cargo install --path .
 | `Alt + Right` | Navigate forward |
 
 ## Usage
+
+### Document Viewer
 
 ```bash
 # View an HTML file directly
@@ -87,17 +91,41 @@ wee --fullscreen index.html
 wee --width 1280 --height 800 index.html
 ```
 
+### Live Wallpaper Daemon Mode
+
+```bash
+# Set an HTML page or video as your desktop wallpaper (runs in background)
+wee ~/path/to/wallpaper.html -dmn
+
+# Restore last used wallpaper on login or reboot
+wee -dmn
+
+# Run with audio enabled (muted by default for quiet desktop use)
+wee ~/path/to/video-wallpaper.html -dmn --audio
+
+# Stop running wallpaper daemon and remove autostart entry
+wee kill
+
+# Terminate all running wee wallpaper instances
+wee kill -a
+```
+
 ### Command Line Options
 
 ```text
-Usage: wee [OPTIONS] [PATH]
+Usage: wee [COMMAND] [OPTIONS] [PATH]
+
+Commands:
+  kill                   Kill running wee wallpaper daemons and clean up autostart
 
 Arguments:
-  [PATH]  Path to local HTML file or directory containing index.html
+  [PATH]                 Path to local HTML file or directory containing index.html
 
 Options:
   -p, --path <PATH>      Path flag alternative (-p / --path)
+  -D, --dmn              Run as wallpaper daemon in background (alias: --daemon)
   -n, --detach           Run detached in background as a standalone app (unhooked from terminal)
+      --audio            Enable audio in wallpaper daemon mode (muted by default)
   -w, --watch            Enable live-reload (auto-refreshes when file or directory changes)
   -d, --devtools         Enable Developer Tools (F12 / right-click Inspect Element)
       --width <WIDTH>    Initial window width [default: 1024]

@@ -1,18 +1,21 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use notify::Watcher;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "wee",
-    about = "An ultra-lightweight, dedicated local HTML page viewer built in Rust",
+    about = "An ultra-lightweight local HTML page viewer and wallpaper daemon built in Rust",
     version
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// Path to local HTML file or directory containing index.html
     #[arg(value_name = "PATH")]
     path: Option<PathBuf>,
@@ -21,9 +24,17 @@ struct Cli {
     #[arg(short = 'p', long = "path", value_name = "PATH")]
     path_flag: Option<PathBuf>,
 
+    /// Run as wallpaper daemon in background
+    #[arg(short = 'D', long = "dmn", visible_aliases = ["daemon", "wallpaper"])]
+    daemon: bool,
+
     /// Run detached in background as a standalone app (unhooked from terminal)
     #[arg(short = 'n', long = "detach", visible_alias = "no-terminal")]
     detach: bool,
+
+    /// Enable audio in wallpaper daemon mode (muted by default)
+    #[arg(long = "audio")]
+    audio: bool,
 
     /// Enable live-reload (auto-refreshes when file or directory changes)
     #[arg(short = 'w', long = "watch")]
@@ -50,6 +61,16 @@ struct Cli {
     title: Option<String>,
 }
 
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Kill running wee wallpaper daemons and clean up autostart
+    Kill {
+        /// Kill all running instances
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+    },
+}
+
 #[derive(Debug)]
 enum UserEvent {
     Quit,
@@ -58,20 +79,191 @@ enum UserEvent {
     SetTitle(String),
 }
 
-fn resolve_html_target(cli_path: Option<PathBuf>) -> Result<(PathBuf, PathBuf), String> {
+fn get_config_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("XDG_CONFIG_HOME") {
+        PathBuf::from(p).join("wee")
+    } else if let Ok(h) = std::env::var("HOME") {
+        PathBuf::from(h).join(".config").join("wee")
+    } else {
+        PathBuf::from(".config/wee")
+    }
+}
+
+fn get_state_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("XDG_STATE_HOME") {
+        PathBuf::from(p).join("wee")
+    } else if let Ok(h) = std::env::var("HOME") {
+        PathBuf::from(h).join(".local/state").join("wee")
+    } else {
+        PathBuf::from(".local/state/wee")
+    }
+}
+
+fn get_wallpaper_conf_path() -> PathBuf {
+    get_config_dir().join("wallpaper.conf")
+}
+
+fn get_pid_file_path() -> PathBuf {
+    get_state_dir().join("wallpaper.pid")
+}
+
+fn get_autostart_file_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("XDG_CONFIG_HOME") {
+        Some(PathBuf::from(p).join("autostart").join("wee-wallpaper.desktop"))
+    } else if let Ok(h) = std::env::var("HOME") {
+        Some(PathBuf::from(h).join(".config").join("autostart").join("wee-wallpaper.desktop"))
+    } else {
+        None
+    }
+}
+
+fn handle_kill_command(all: bool) {
+    let pid_file = get_pid_file_path();
+    let mut killed_any = false;
+
+    if pid_file.exists() {
+        if let Ok(content) = std::fs::read_to_string(&pid_file) {
+            if let Ok(pid) = content.trim().parse::<i32>() {
+                unsafe {
+                    if libc::kill(pid, 0) == 0 {
+                        libc::kill(pid, libc::SIGTERM);
+                        let start = Instant::now();
+                        while start.elapsed() < Duration::from_millis(1500) {
+                            if libc::kill(pid, 0) != 0 {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        if libc::kill(pid, 0) == 0 {
+                            libc::kill(pid, libc::SIGKILL);
+                        }
+                        println!("[wee] Stopped wallpaper daemon (PID {}).", pid);
+                        killed_any = true;
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&pid_file);
+    }
+
+    if all {
+        let current_pid = std::process::id() as i32;
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                if let Ok(name) = entry.file_name().into_string() {
+                    if let Ok(pid) = name.parse::<i32>() {
+                        if pid != current_pid {
+                            let cmdline_path = entry.path().join("cmdline");
+                            if let Ok(cmdline) = std::fs::read(cmdline_path) {
+                                let cmd = String::from_utf8_lossy(&cmdline);
+                                if cmd.contains("wee") && (cmd.contains("dmn") || cmd.contains("daemon") || cmd.contains("_WEE_DAEMON_INTERNAL")) {
+                                    unsafe {
+                                        libc::kill(pid, libc::SIGTERM);
+                                    }
+                                    println!("[wee] Terminated wee instance (PID {}).", pid);
+                                    killed_any = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(autostart_path) = get_autostart_file_path() {
+        if autostart_path.exists() {
+            let _ = std::fs::remove_file(&autostart_path);
+            println!("[wee] Removed autostart entry.");
+        }
+    }
+
+    if !killed_any {
+        println!("[wee] No running wallpaper daemon found.");
+    }
+}
+
+fn write_autostart_file(exe_path: &Path) {
+    if let Some(autostart_path) = get_autostart_file_path() {
+        if let Some(parent) = autostart_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let content = format!(
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name=Wee Wallpaper Daemon\n\
+             Comment=Wee Live HTML Wallpaper Daemon\n\
+             Exec={} -dmn\n\
+             Terminal=false\n\
+             StartupNotify=false\n\
+             X-GNOME-Autostart-enabled=true\n",
+            exe_path.display()
+        );
+        let _ = std::fs::write(autostart_path, content);
+    }
+}
+
+fn stop_existing_daemon() {
+    let pid_file = get_pid_file_path();
+    if pid_file.exists() {
+        if let Ok(content) = std::fs::read_to_string(&pid_file) {
+            if let Ok(pid) = content.trim().parse::<i32>() {
+                unsafe {
+                    if libc::kill(pid, 0) == 0 {
+                        libc::kill(pid, libc::SIGTERM);
+                        let start = Instant::now();
+                        while start.elapsed() < Duration::from_millis(1000) {
+                            if libc::kill(pid, 0) != 0 {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        if libc::kill(pid, 0) == 0 {
+                            libc::kill(pid, libc::SIGKILL);
+                        }
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&pid_file);
+    }
+}
+
+fn resolve_html_target(cli_path: Option<PathBuf>, is_daemon: bool) -> Result<(PathBuf, PathBuf), String> {
     let target = match cli_path {
         Some(p) => p,
         None => {
-            // Check if index.html exists in current working directory
-            let cwd_index = Path::new("index.html");
-            if cwd_index.exists() {
-                PathBuf::from("index.html")
+            if is_daemon {
+                let conf = get_wallpaper_conf_path();
+                if conf.exists() {
+                    if let Ok(saved) = std::fs::read_to_string(&conf) {
+                        let trimmed = saved.trim();
+                        if !trimmed.is_empty() {
+                            PathBuf::from(trimmed)
+                        } else {
+                            return Err("Saved wallpaper configuration is empty.".to_string());
+                        }
+                    } else {
+                        return Err("Failed to read saved wallpaper configuration.".to_string());
+                    }
+                } else {
+                    return Err(
+                        "No HTML file provided and no saved wallpaper found.\n\
+                         Usage: wee <path/to/file.html> -dmn"
+                            .to_string(),
+                    );
+                }
             } else {
-                return Err(
-                    "No HTML file provided and no 'index.html' found in current directory.\n\
-                     Usage: wee <path/to/file.html> [-w] [-d]"
-                        .to_string(),
-                );
+                let cwd_index = Path::new("index.html");
+                if cwd_index.exists() {
+                    PathBuf::from("index.html")
+                } else {
+                    return Err(
+                        "No HTML file provided and no 'index.html' found in current directory.\n\
+                         Usage: wee <path/to/file.html> [-w] [-d] [-dmn]"
+                            .to_string(),
+                    );
+                }
             }
         }
     };
@@ -163,28 +355,23 @@ fn html_escape(s: &str) -> String {
 const INJECTED_HOTKEYS_SCRIPT: &str = r#"
 (function() {
     window.addEventListener('keydown', function(e) {
-        // Ctrl+R or F5: Reload
         if (((e.ctrlKey || e.metaKey) && (e.key === 'r' || e.key === 'R')) || e.key === 'F5') {
             e.preventDefault();
             if (window.ipc) { window.ipc.postMessage('reload'); }
             else { location.reload(); }
         }
-        // Ctrl+Q: Exit
         else if ((e.ctrlKey || e.metaKey) && (e.key === 'q' || e.key === 'Q')) {
             e.preventDefault();
             if (window.ipc) { window.ipc.postMessage('quit'); }
         }
-        // F12: Toggle DevTools
         else if (e.key === 'F12') {
             e.preventDefault();
             if (window.ipc) { window.ipc.postMessage('toggle_devtools'); }
         }
-        // Alt+Left Arrow: Back
         else if (e.altKey && e.key === 'ArrowLeft') {
             e.preventDefault();
             window.history.back();
         }
-        // Alt+Right Arrow: Forward
         else if (e.altKey && e.key === 'ArrowRight') {
             e.preventDefault();
             window.history.forward();
@@ -193,11 +380,69 @@ const INJECTED_HOTKEYS_SCRIPT: &str = r#"
 })();
 "#;
 
+const INJECTED_MUTED_VIDEO_SCRIPT: &str = r#"
+(function() {
+    function enforceBackgroundVideo() {
+        document.querySelectorAll('video, audio').forEach(function(el) {
+            el.muted = true;
+            if (el.tagName === 'VIDEO') {
+                el.loop = true;
+                el.playsInline = true;
+            }
+            if (el.paused) {
+                el.play().catch(function(){});
+            }
+        });
+    }
+    window.addEventListener('DOMContentLoaded', enforceBackgroundVideo);
+    window.addEventListener('load', enforceBackgroundVideo);
+    var observer = new MutationObserver(enforceBackgroundVideo);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+})();
+"#;
+
+const INJECTED_UNMUTED_VIDEO_SCRIPT: &str = r#"
+(function() {
+    function enforceBackgroundVideo() {
+        document.querySelectorAll('video').forEach(function(el) {
+            el.loop = true;
+            el.playsInline = true;
+            if (el.paused) {
+                el.play().catch(function(){});
+            }
+        });
+    }
+    window.addEventListener('DOMContentLoaded', enforceBackgroundVideo);
+    window.addEventListener('load', enforceBackgroundVideo);
+    var observer = new MutationObserver(enforceBackgroundVideo);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+})();
+"#;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Cli::parse();
+    let raw_args: Vec<String> = std::env::args()
+        .map(|arg| {
+            if arg == "-dmn" {
+                "--dmn".to_string()
+            } else if arg == "-path" {
+                "--path".to_string()
+            } else {
+                arg
+            }
+        })
+        .collect();
+
+    let args = Cli::parse_from(raw_args);
+
+    if let Some(Commands::Kill { all }) = args.command {
+        handle_kill_command(all);
+        return Ok(());
+    }
+
+    let is_daemon = args.daemon;
     let requested_path = args.path.or(args.path_flag);
 
-    let (html_file, base_dir) = match resolve_html_target(requested_path) {
+    let (html_file, base_dir) = match resolve_html_target(requested_path, is_daemon) {
         Ok(paths) => paths,
         Err(err_msg) => {
             eprintln!("\x1b[1;31merror:\x1b[0m {}", err_msg);
@@ -205,8 +450,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Detach from controlling terminal if -n / --detach is requested
-    if args.detach && std::env::var("_WEE_DETACHED").is_err() {
+    if is_daemon {
+        let conf_dir = get_config_dir();
+        let _ = std::fs::create_dir_all(&conf_dir);
+        let _ = std::fs::write(get_wallpaper_conf_path(), html_file.display().to_string());
+
+        if let Ok(exe) = std::env::current_exe() {
+            write_autostart_file(&exe);
+        }
+    }
+
+    if is_daemon && std::env::var("_WEE_DAEMON_INTERNAL").is_err() {
+        stop_existing_daemon();
+
+        let exe = std::env::current_exe()?;
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg(&html_file);
+        cmd.arg("--dmn");
+        if args.audio {
+            cmd.arg("--audio");
+        }
+        cmd.env("_WEE_DAEMON_INTERNAL", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        #[cfg(unix)]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+
+        let child = cmd.spawn()?;
+        let pid = child.id() as i32;
+
+        let pid_path = get_pid_file_path();
+        let _ = std::fs::create_dir_all(get_state_dir());
+        let _ = std::fs::write(pid_path, pid.to_string());
+
+        println!("[wee] Wallpaper daemon started (PID {}).", pid);
+        std::process::exit(0);
+    }
+
+    if args.detach && std::env::var("_WEE_DETACHED").is_err() && !is_daemon {
         let exe = std::env::current_exe()?;
         let mut cmd = std::process::Command::new(exe);
         cmd.arg(&html_file);
@@ -255,23 +544,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let has_custom_title = args.title.is_some();
 
-    // Set up tao event loop and proxy for cross-thread event dispatching
     let event_loop = tao::event_loop::EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
-    // Build the native window
     let mut window_builder = tao::window::WindowBuilder::new()
         .with_title(&initial_title)
+        .with_visible(!is_daemon)
+        .with_decorations(!is_daemon)
         .with_inner_size(tao::dpi::LogicalSize::new(args.width as f64, args.height as f64));
 
-    if args.fullscreen {
+    if args.fullscreen && !is_daemon {
         window_builder = window_builder.with_fullscreen(Some(tao::window::Fullscreen::Borderless(None)));
     }
 
     let window = window_builder.build(&event_loop)?;
 
-    // Set up optional live-reload file watcher
-    let _watcher = if args.watch {
+    #[cfg(target_os = "linux")]
+    if is_daemon {
+        use tao::platform::unix::WindowExtUnix;
+
+        if gtk_layer_shell::is_supported() {
+            use gtk_layer_shell::{Edge, Layer, LayerShell};
+            let gtk_win = window.gtk_window();
+            gtk_win.init_layer_shell();
+            gtk_win.set_layer(Layer::Background);
+            gtk_win.set_anchor(Edge::Top, true);
+            gtk_win.set_anchor(Edge::Bottom, true);
+            gtk_win.set_anchor(Edge::Left, true);
+            gtk_win.set_anchor(Edge::Right, true);
+            gtk_win.set_exclusive_zone(-1);
+            gtk_win.set_namespace("wee-wallpaper");
+            gtk_win.set_keyboard_mode(gtk_layer_shell::KeyboardMode::None);
+            window.set_visible(true);
+        } else {
+            use gtk::prelude::GtkWindowExt;
+            let gtk_win = window.gtk_window();
+            gtk_win.set_keep_below(true);
+            gtk_win.set_skip_taskbar_hint(true);
+            gtk_win.set_skip_pager_hint(true);
+            window.set_fullscreen(Some(tao::window::Fullscreen::Borderless(None)));
+            window.set_visible(true);
+        }
+    }
+
+    let _watcher = if args.watch && !is_daemon {
         let p_watch = proxy.clone();
         let last_reload = Arc::new(AtomicU64::new(0));
         let watch_dir = base_dir.clone();
@@ -296,7 +612,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .as_millis() as u64;
 
                     let prev = last_reload.load(Ordering::Relaxed);
-                    // Debounce filesystem events within 120ms
                     if now.saturating_sub(prev) > 120 {
                         last_reload.store(now, Ordering::Relaxed);
                         let _ = p_watch.send_event(UserEvent::Reload);
@@ -311,7 +626,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Calculate relative entry file inside base_dir
     let rel_entry = html_file
         .strip_prefix(&base_dir)
         .unwrap_or(&html_file)
@@ -320,12 +634,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let initial_url = format!("wee://localhost/{}", rel_entry);
 
-    // Build wry webview
     let mut webview_builder = wry::WebViewBuilder::new();
     webview_builder = webview_builder.with_devtools(args.devtools);
+    webview_builder = webview_builder.with_autoplay(true);
     webview_builder = webview_builder.with_initialization_script(INJECTED_HOTKEYS_SCRIPT);
 
-    // IPC handler for JavaScript keyboard shortcuts
+    if is_daemon {
+        if args.audio {
+            webview_builder = webview_builder.with_initialization_script(INJECTED_UNMUTED_VIDEO_SCRIPT);
+        } else {
+            webview_builder = webview_builder.with_initialization_script(INJECTED_MUTED_VIDEO_SCRIPT);
+        }
+    }
+
     let p_ipc = proxy.clone();
     let devtools_enabled = args.devtools;
     webview_builder = webview_builder.with_ipc_handler(move |req: wry::http::Request<String>| {
@@ -345,7 +666,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Sync window title with HTML <title> tag
     let p_title = proxy.clone();
     webview_builder = webview_builder.with_document_title_changed_handler(move |doc_title| {
         if !doc_title.trim().is_empty() {
@@ -353,7 +673,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Navigation interceptor: route http/https links to external default browser
     webview_builder = webview_builder.with_navigation_handler(move |nav_url: String| {
         if nav_url.starts_with("http://")
             || nav_url.starts_with("https://")
@@ -361,13 +680,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             || nav_url.starts_with("tel:")
         {
             let _ = open::that_detached(&nav_url);
-            false // Do not navigate internally; opened in system browser
+            false
         } else {
-            true // Allow local wee:// navigation
+            true
         }
     });
 
-    // Custom protocol handler to serve local files & assets safely
     let serve_base = base_dir.clone();
     webview_builder = webview_builder.with_custom_protocol("wee".into(), move |_id, req| {
         let uri_path = req.uri().path();
@@ -410,7 +728,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         create_404_response(uri_path)
     });
 
-    // Load initial URL
     webview_builder = webview_builder.with_url(&initial_url);
 
     #[cfg(target_os = "linux")]
@@ -424,12 +741,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(target_os = "linux"))]
     let webview = webview_builder.build(&window)?;
 
-    println!(
-        "\x1b[1;36m[wee]\x1b[0m Viewing: \x1b[1m{}\x1b[0m",
-        html_file.display()
-    );
+    if !is_daemon {
+        println!(
+            "\x1b[1;36m[wee]\x1b[0m Viewing: \x1b[1m{}\x1b[0m",
+            html_file.display()
+        );
+    }
 
-    // Run the native application event loop
     event_loop.run(move |event, _, control_flow| {
         *control_flow = tao::event_loop::ControlFlow::Wait;
 
@@ -439,17 +757,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..
             } => {
                 *control_flow = tao::event_loop::ControlFlow::Exit;
-            }
-
-            tao::event::Event::WindowEvent {
-                event:
-                    tao::event::WindowEvent::KeyboardInput {
-                        event: _key_event,
-                        ..
-                    },
-                ..
-            } => {
-                // Key events inside webview are captured by INJECTED_HOTKEYS_SCRIPT
             }
 
             tao::event::Event::UserEvent(user_event) => match user_event {
@@ -469,7 +776,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 UserEvent::SetTitle(doc_title) => {
-                    if !has_custom_title {
+                    if !has_custom_title && !is_daemon {
                         window.set_title(&format!("{} - wee", doc_title));
                     }
                 }
