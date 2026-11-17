@@ -97,6 +97,9 @@ wee --width 1280 --height 800 index.html
 # Set an HTML page or video as your desktop wallpaper (runs in background)
 wee ~/path/to/wallpaper.html -dmn
 
+# Set interactive wallpaper: click-through by default; hold Spacebar to interact with it
+wee ~/path/to/interactive.html -dmn -s
+
 # Restore last used wallpaper on login or reboot
 wee -dmn
 
@@ -124,6 +127,7 @@ Arguments:
 Options:
   -p, --path <PATH>      Path flag alternative (-p / --path)
   -D, --dmn              Run as wallpaper daemon in background (alias: --daemon)
+  -s, --space            Enable Spacebar hold-to-interact mode (click-through by default; hold Space to interact)
   -n, --detach           Run detached in background as a standalone app (unhooked from terminal)
       --audio            Enable audio in wallpaper daemon mode (muted by default)
   -w, --watch            Enable live-reload (auto-refreshes when file or directory changes)

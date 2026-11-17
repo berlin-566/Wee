@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wee Interactive Wallpaper Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background: #090d16;
+            color: #e6edf3;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+            user-select: none;
+        }
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+        .hud {
+            position: absolute;
+            top: 2rem;
+            left: 2rem;
+            background: rgba(22, 27, 34, 0.85);
+            border: 1px solid rgba(48, 54, 61, 0.9);
+            border-radius: 10px;
+            padding: 1.2rem 1.6rem;
+            backdrop-filter: blur(12px);
+            max-width: 420px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+            pointer-events: none;
+            transition: all 0.3s ease;
+        }
+        .hud h1 {
+            font-size: 1.25rem;
+            font-weight: 700;
+            margin-bottom: 0.4rem;
+            color: #58a6ff;
+        }
+        .hud p {
+            font-size: 0.9rem;
+            color: #8b949e;
+            line-height: 1.5;
+        }
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 0.2rem 0.6rem;
+            border-radius: 999px;
+            background: #21262d;
+            border: 1px solid #30363d;
+            color: #8b949e;
+            margin-bottom: 0.6rem;
+        }
+        .status-pill.active {
+            background: rgba(63, 185, 80, 0.15);
+            border-color: rgba(63, 185, 80, 0.5);
+            color: #3fb950;
+        }
+        kbd {
+            background: #2b313a;
+            border: 1px solid #484f58;
+            border-radius: 4px;
+            padding: 0.1rem 0.4rem;
+            font-family: monospace;
+            font-size: 0.85em;
+            color: #c9d1d9;
+        }
+    </style>
+</head>
+<body>
+    <div class="hud">
+        <div id="status-badge" class="status-pill">Background Mode (Pass-Through)</div>
+        <h1>Wee Interactive Wallpaper</h1>
+        <p>Hold <kbd>Spacebar</kbd> to unlock full interaction. Click and drag your mouse anywhere to generate light particles!</p>
+    </div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const badge = document.getElementById('status-badge');
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        window.addEventListener('wee-interactive', function(e) {
+            if (e.detail && e.detail.active) {
+                badge.textContent = "Interactive Mode (Active)";
+                badge.classList.add('active');
+            } else {
+                badge.textContent = "Background Mode (Pass-Through)";
+                badge.classList.remove('active');
+            }
+        });
+
+        const particles = [];
+        class Particle {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.size = Math.random() * 5 + 2;
+                this.speedX = (Math.random() - 0.5) * 6;
+                this.speedY = (Math.random() - 0.5) * 6;
+                this.color = 'hsl(' + Math.floor(Math.random() * 360) + ', 80%, 65%)';
+                this.alpha = 1;
+            }
+            update() {
+                this.x += this.speedX;
+                this.y += this.speedY;
+                this.alpha -= 0.015;
+            }
+            draw() {
+                ctx.save();
+                ctx.globalAlpha = Math.max(0, this.alpha);
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        function createParticles(x, y, count) {
+            for (let i = 0; i < count; i++) {
+                particles.push(new Particle(x, y));
+            }
+        }
+
+        window.addEventListener('mousemove', function(e) {
+            createParticles(e.clientX, e.clientY, 3);
+        });
+
+        window.addEventListener('mousedown', function(e) {
+            createParticles(e.clientX, e.clientY, 25);
+        });
+
+        function animate() {
+            ctx.fillStyle = 'rgba(9, 13, 22, 0.2)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            for (let i = particles.length - 1; i >= 0; i--) {
+                particles[i].update();
+                particles[i].draw();
+                if (particles[i].alpha <= 0) {
+                    particles.splice(i, 1);
+                }
+            }
+
+            requestAnimationFrame(animate);
+        }
+        animate();
+    </script>
+</body>
+</html>

@@ -28,6 +28,10 @@ struct Cli {
     #[arg(short = 'D', long = "dmn", visible_aliases = ["daemon", "wallpaper"])]
     daemon: bool,
 
+    /// Enable Spacebar hold-to-interact mode (click-through by default; hold Space to interact)
+    #[arg(short = 's', long = "space", visible_aliases = ["space-interact", "spacebar"])]
+    space: bool,
+
     /// Run detached in background as a standalone app (unhooked from terminal)
     #[arg(short = 'n', long = "detach", visible_alias = "no-terminal")]
     detach: bool,
@@ -77,6 +81,7 @@ enum UserEvent {
     Reload,
     ToggleDevTools,
     SetTitle(String),
+    SetInteractive(bool),
 }
 
 fn get_config_dir() -> PathBuf {
@@ -111,7 +116,7 @@ fn get_autostart_file_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("XDG_CONFIG_HOME") {
         Some(PathBuf::from(p).join("autostart").join("wee-wallpaper.desktop"))
     } else if let Ok(h) = std::env::var("HOME") {
-        Some(PathBuf::from(h).join(".config").join("autostart").join("wee-wallpaper.desktop"))
+        Some(PathBuf::from(h).join(".config/autostart").join("wee-wallpaper.desktop"))
     } else {
         None
     }
@@ -183,21 +188,28 @@ fn handle_kill_command(all: bool) {
     }
 }
 
-fn write_autostart_file(exe_path: &Path) {
+fn write_autostart_file(exe_path: &Path, space: bool, audio: bool) {
     if let Some(autostart_path) = get_autostart_file_path() {
         if let Some(parent) = autostart_path.parent() {
             let _ = std::fs::create_dir_all(parent);
+        }
+        let mut exec = format!("{} -dmn", exe_path.display());
+        if space {
+            exec.push_str(" -s");
+        }
+        if audio {
+            exec.push_str(" --audio");
         }
         let content = format!(
             "[Desktop Entry]\n\
              Type=Application\n\
              Name=Wee Wallpaper Daemon\n\
              Comment=Wee Live HTML Wallpaper Daemon\n\
-             Exec={} -dmn\n\
+             Exec={}\n\
              Terminal=false\n\
              StartupNotify=false\n\
              X-GNOME-Autostart-enabled=true\n",
-            exe_path.display()
+            exec
         );
         let _ = std::fs::write(autostart_path, content);
     }
@@ -355,7 +367,10 @@ fn html_escape(s: &str) -> String {
 const INJECTED_HOTKEYS_SCRIPT: &str = r#"
 (function() {
     window.addEventListener('keydown', function(e) {
-        if (((e.ctrlKey || e.metaKey) && (e.key === 'r' || e.key === 'R')) || e.key === 'F5') {
+        if (e.code === 'Space' || e.key === ' ') {
+            if (!e.repeat && window.ipc) { window.ipc.postMessage('space_down'); }
+        }
+        else if (((e.ctrlKey || e.metaKey) && (e.key === 'r' || e.key === 'R')) || e.key === 'F5') {
             e.preventDefault();
             if (window.ipc) { window.ipc.postMessage('reload'); }
             else { location.reload(); }
@@ -375,6 +390,12 @@ const INJECTED_HOTKEYS_SCRIPT: &str = r#"
         else if (e.altKey && e.key === 'ArrowRight') {
             e.preventDefault();
             window.history.forward();
+        }
+    });
+
+    window.addEventListener('keyup', function(e) {
+        if (e.code === 'Space' || e.key === ' ') {
+            if (window.ipc) { window.ipc.postMessage('space_up'); }
         }
     });
 })();
@@ -426,6 +447,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "--dmn".to_string()
             } else if arg == "-path" {
                 "--path".to_string()
+            } else if arg == "-space" {
+                "--space".to_string()
             } else {
                 arg
             }
@@ -440,6 +463,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let is_daemon = args.daemon;
+    let is_space_mode = args.space;
     let requested_path = args.path.or(args.path_flag);
 
     let (html_file, base_dir) = match resolve_html_target(requested_path, is_daemon) {
@@ -456,7 +480,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = std::fs::write(get_wallpaper_conf_path(), html_file.display().to_string());
 
         if let Ok(exe) = std::env::current_exe() {
-            write_autostart_file(&exe);
+            write_autostart_file(&exe, is_space_mode, args.audio);
         }
     }
 
@@ -467,6 +491,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut cmd = std::process::Command::new(exe);
         cmd.arg(&html_file);
         cmd.arg("--dmn");
+        if is_space_mode {
+            cmd.arg("-s");
+        }
         if args.audio {
             cmd.arg("--audio");
         }
@@ -574,7 +601,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             gtk_win.set_anchor(Edge::Right, true);
             gtk_win.set_exclusive_zone(-1);
             gtk_win.set_namespace("wee-wallpaper");
-            gtk_win.set_keyboard_mode(gtk_layer_shell::KeyboardMode::None);
+
+            if is_space_mode {
+                use gtk::cairo;
+                use gtk::gdk;
+                use gtk::glib;
+                use gtk::prelude::WidgetExt;
+
+                gtk_win.set_keyboard_mode(gtk_layer_shell::KeyboardMode::OnDemand);
+
+                let empty_region = cairo::Region::create();
+                gtk_win.input_shape_combine_region(Some(&empty_region));
+
+                let p_press = proxy.clone();
+                gtk_win.connect_key_press_event(move |_win, event| {
+                    if event.keyval() == gdk::keys::constants::space {
+                        let _ = p_press.send_event(UserEvent::SetInteractive(true));
+                    }
+                    glib::Propagation::Proceed
+                });
+
+                let p_rel = proxy.clone();
+                gtk_win.connect_key_release_event(move |_win, event| {
+                    if event.keyval() == gdk::keys::constants::space {
+                        let _ = p_rel.send_event(UserEvent::SetInteractive(false));
+                    }
+                    glib::Propagation::Proceed
+                });
+            } else {
+                gtk_win.set_keyboard_mode(gtk_layer_shell::KeyboardMode::None);
+            }
+
             window.set_visible(true);
         } else {
             use gtk::prelude::GtkWindowExt;
@@ -583,6 +640,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             gtk_win.set_skip_taskbar_hint(true);
             gtk_win.set_skip_pager_hint(true);
             window.set_fullscreen(Some(tao::window::Fullscreen::Borderless(None)));
+
+            if is_space_mode {
+                use gtk::cairo;
+                use gtk::gdk;
+                use gtk::glib;
+                use gtk::prelude::WidgetExt;
+
+                let empty_region = cairo::Region::create();
+                gtk_win.input_shape_combine_region(Some(&empty_region));
+
+                let p_press = proxy.clone();
+                gtk_win.connect_key_press_event(move |_win, event| {
+                    if event.keyval() == gdk::keys::constants::space {
+                        let _ = p_press.send_event(UserEvent::SetInteractive(true));
+                    }
+                    glib::Propagation::Proceed
+                });
+
+                let p_rel = proxy.clone();
+                gtk_win.connect_key_release_event(move |_win, event| {
+                    if event.keyval() == gdk::keys::constants::space {
+                        let _ = p_rel.send_event(UserEvent::SetInteractive(false));
+                    }
+                    glib::Propagation::Proceed
+                });
+            }
+
             window.set_visible(true);
         }
     }
@@ -660,6 +744,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "toggle_devtools" => {
                 if devtools_enabled {
                     let _ = p_ipc.send_event(UserEvent::ToggleDevTools);
+                }
+            }
+            "space_down" => {
+                if is_space_mode {
+                    let _ = p_ipc.send_event(UserEvent::SetInteractive(true));
+                }
+            }
+            "space_up" => {
+                if is_space_mode {
+                    let _ = p_ipc.send_event(UserEvent::SetInteractive(false));
                 }
             }
             _ => {}
@@ -778,6 +872,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 UserEvent::SetTitle(doc_title) => {
                     if !has_custom_title && !is_daemon {
                         window.set_title(&format!("{} - wee", doc_title));
+                    }
+                }
+                UserEvent::SetInteractive(active) => {
+                    #[cfg(target_os = "linux")]
+                    if is_daemon && is_space_mode {
+                        use gtk::prelude::WidgetExt;
+                        use tao::platform::unix::WindowExtUnix;
+                        let gtk_win = window.gtk_window();
+                        if active {
+                            gtk_win.input_shape_combine_region(None);
+                            let _ = webview.evaluate_script(
+                                "window.dispatchEvent(new CustomEvent('wee-interactive', { detail: { active: true } }));"
+                            );
+                        } else {
+                            let empty = gtk::cairo::Region::create();
+                            gtk_win.input_shape_combine_region(Some(&empty));
+                            let _ = webview.evaluate_script(
+                                "window.dispatchEvent(new CustomEvent('wee-interactive', { detail: { active: false } }));"
+                            );
+                        }
                     }
                 }
             },
